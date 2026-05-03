@@ -1,0 +1,12 @@
+AORIX FOOD APP ULTRA V4
+
+Mejoras aplicadas:
+1. Estilo visual inspirado en app moderna de comida: fondo oscuro en celular, botones coral, tarjetas redondeadas y paneles limpios.
+2. Diseño web más presentable tipo sistema comercial: pestañas limpias, botones grandes, paneles blancos y tarjetas ejecutivas.
+3. Login rediseñado estilo app food.
+4. Navegación móvil compacta: ya no queda el sidebar gigante ocupando pantalla.
+5. Pestañas, tablas, formularios y reportes adaptados para celular.
+6. Indicadores con tarjetas y gráfico de barras mejorado.
+7. Se mantiene listo para Render: Procfile, requirements.txt, runtime.txt, render.yaml.
+
+Nota: La referencia Kyte requiere JavaScript para ver la pantalla interna; se tomó como guía visual de app moderna/configuración simple.

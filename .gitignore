@@ -1,5 +1,10 @@
 __pycache__/
 *.pyc
+*.db
 .env
-database/*.db
-receipts/*
+/data/*
+/uploads/*
+/reportes/*
+!data/.gitkeep
+!uploads/.gitkeep
+!reportes/.gitkeep
