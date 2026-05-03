@@ -14,7 +14,7 @@ SECRET_KEY = os.environ.get("SECRET_KEY", "aorix-pos-render-cambiar")
 
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
-app = Flask(__name__, template_folder="templates", static_folder="static")
+app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"), static_folder=os.path.join(BASE_DIR, "static"))
 app.secret_key = SECRET_KEY
 app.config["JSON_AS_ASCII"] = False
 
@@ -160,7 +160,14 @@ def admin_required(fn):
 @app.errorhandler(Exception)
 def handle_exception(e):
     app.logger.exception("Error interno: %s", e)
-    return render_template("error.html", error=str(e)), 500
+    # Blindado para Render: si falta error.html, NO vuelve a reventar con TemplateNotFound.
+    try:
+        return render_template("error.html", error=str(e)), 500
+    except Exception:
+        return f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Error interno</title><style>body{{font-family:Arial;padding:30px;background:#f8fafc}}.box{{max-width:760px;margin:auto;background:white;padding:24px;border-radius:16px;box-shadow:0 8px 24px #0001}}code{{color:#b91c1c}}</style></head>
+<body><div class="box"><h1>Error interno del servidor</h1><p>La app inició, pero ocurrió un error:</p><code>{str(e)}</code><p>Verifica que hayas subido también la carpeta <b>templates</b> y <b>static</b>.</p></div></body></html>""", 500
 
 
 @app.route("/healthz", methods=["GET", "HEAD"])

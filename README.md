@@ -1,6 +1,6 @@
-# AORIX POS / Kyte Clone Pro Render
+# AORIX / KYTE POS PRO - Render
 
-Proyecto Flask listo para GitHub y Render.
+Proyecto Flask listo para GitHub + Render.
 
 ## Usuarios demo
 - admin1 / admin123
@@ -8,7 +8,16 @@ Proyecto Flask listo para GitHub y Render.
 - vendedor1 / venta123
 
 ## Render
-Build command: `pip install -r requirements.txt`
-Start command: `gunicorn app:app --bind 0.0.0.0:$PORT`
+Build Command:
+```bash
+pip install -r requirements.txt
+```
 
-Se agregó `.python-version` porque Render ahora recomienda fijar la versión de Python con ese archivo o con la variable `PYTHON_VERSION`.
+Start Command:
+```bash
+gunicorn --bind 0.0.0.0:$PORT app:app --workers 1 --threads 4 --timeout 120
+```
+
+## Importante
+Sube TODO el contenido del ZIP: `app.py`, `templates/`, `static/`, `requirements.txt`, `Procfile`, `.python-version`.
+No subas solo `app.py`.
