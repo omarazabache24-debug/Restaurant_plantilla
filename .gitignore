@@ -1,5 +1,5 @@
 __pycache__/
 *.pyc
+*.db
+instance/*.db
 .env
-database/*.db
-database/*.db-*

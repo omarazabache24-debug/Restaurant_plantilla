@@ -1,4 +1,6 @@
-# AORIX POS Pro - Render
+# Kyte Checkout Pro para Render
+
+Proyecto Flask POS/Checkout inspirado en el flujo de Kyte Web, listo para GitHub + Render.
 
 ## Render
 Build Command:
@@ -10,9 +12,6 @@ Start Command:
 gunicorn --bind 0.0.0.0:$PORT app:app --workers 1 --threads 4 --timeout 120
 ```
 
-Usuarios demo:
+## Usuarios demo
 - admin1 / admin123
-- admin2 / admin123
 - vendedor1 / venta123
-
-Esta versión incluye plantillas internas dentro de app.py para evitar definitivamente `TemplateNotFound: error.html`.

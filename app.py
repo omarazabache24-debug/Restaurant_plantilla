@@ -1,208 +1,228 @@
-import os
-import sqlite3
-import logging
+import os, sqlite3, json, secrets
 from datetime import datetime
 from functools import wraps
-from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
-from jinja2 import DictLoader, ChoiceLoader, FileSystemLoader
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify, g, flash, abort
 from werkzeug.security import generate_password_hash, check_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.environ.get("DATABASE_PATH", os.path.join(BASE_DIR, "database", "pos.db"))
-SECRET_KEY = os.environ.get("SECRET_KEY", "aorix-pos-render-cambiar")
+DB_PATH = os.environ.get('DATABASE_PATH', os.path.join(BASE_DIR, 'instance', 'kyte_checkout.db'))
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
-db_dir = os.path.dirname(DB_PATH)
-if db_dir:
-    os.makedirs(db_dir, exist_ok=True)
+app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY', 'render-demo-' + secrets.token_hex(16))
+app.config.update(JSON_AS_ASCII=False)
 
-app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"), static_folder=os.path.join(BASE_DIR, "static"))
-app.secret_key = SECRET_KEY
-app.config["JSON_AS_ASCII"] = False
-logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
 
-# PLANTILLAS INTERNAS DE RESPALDO: Render no volverá a caer por TemplateNotFound aunque no suban /templates.
-EMBEDDED_TEMPLATES = {
-"base.html": r'''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ app_name }}</title><link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}"><style>body{margin:0;font-family:Arial;background:#f5f6fb;color:#111}.layout{display:flex;min-height:100vh}.side{width:245px;background:#111827;color:white;padding:18px;position:sticky;top:0;height:100vh}.brand{font-size:23px;font-weight:800;margin-bottom:18px}.side a{display:block;color:#e5e7eb;text-decoration:none;padding:12px;border-radius:12px;margin:4px 0}.side a:hover{background:#283245}.main{flex:1;padding:22px}.card{background:white;border-radius:18px;padding:18px;margin-bottom:16px;box-shadow:0 8px 25px #0001}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.btn{border:0;border-radius:12px;padding:11px 14px;font-weight:700;cursor:pointer;background:#dc2626;color:#fff}.btn2{background:#111827}.inp{width:100%;box-sizing:border-box;padding:11px;border:1px solid #ddd;border-radius:10px;margin:5px 0 10px}.table{width:100%;border-collapse:collapse}.table th,.table td{padding:10px;border-bottom:1px solid #eee;text-align:left}.msg{padding:10px;border-radius:10px;background:#ecfdf5;margin:8px 0}.err{background:#fef2f2;color:#991b1b}.top{display:flex;justify-content:space-between;align-items:center;gap:10px}.prod{border:1px solid #eee;border-radius:16px;padding:14px;background:#fff}.prod h3{margin:0 0 6px}.price{font-size:22px;font-weight:800;color:#dc2626}.cart-item{display:flex;justify-content:space-between;gap:8px;border-bottom:1px dashed #ddd;padding:8px 0}@media(max-width:760px){.layout{display:block}.side{width:auto;height:auto;position:relative}.main{padding:12px}.top{display:block}.table{font-size:13px}.hide-mobile{display:none}}</style></head><body><div class="layout">{% if me %}<aside class="side"><div class="brand">🔴 AORIX POS</div><p>{{ me.username }} · {{ me.role }}</p><a href="{{ url_for('checkout') }}">🛒 Checkout</a><a href="{{ url_for('sales') }}">📊 Ventas</a><a href="{{ url_for('customers') }}">👥 Clientes</a><a href="{{ url_for('close_day') }}">✅ Cerrar día</a>{% if me.role=='admin' %}<a href="{{ url_for('products') }}">📦 Productos</a><a href="{{ url_for('users') }}">🔐 Usuarios</a>{% endif %}<a href="{{ url_for('logout') }}">🚪 Salir</a></aside>{% endif %}<main class="main">{% for c,m in get_flashed_messages(with_categories=true) %}<div class="msg {% if c=='error' %}err{% endif %}">{{ m }}</div>{% endfor %}{% block content %}{% endblock %}</main></div></body></html>''',
-"login.html": r'''{% extends "base.html" %}{% block content %}<div class="card" style="max-width:430px;margin:8vh auto"><h1>🔴 AORIX POS Pro</h1><p>Ingreso al sistema</p><form method="post"><label>Usuario</label><input class="inp" name="username" value="admin1" required><label>Contraseña</label><input class="inp" name="password" type="password" value="admin123" required><button class="btn" style="width:100%">Ingresar</button></form><p><b>Demo:</b> admin1/admin123 · vendedor1/venta123</p></div>{% endblock %}''',
-"checkout.html": r'''{% extends "base.html" %}{% block content %}<div class="top"><h1>Checkout / Punto de venta</h1><a class="btn btn2" href="{{ url_for('close_day') }}">Cerrar día</a></div><div class="grid"><section class="card" style="grid-column:span 2"><input id="search" class="inp" placeholder="Buscar producto..."><div id="products" class="grid">{% for p in products %}<div class="prod" data-name="{{ p.name|lower }} {{ p.sku|lower }} {{ p.category|lower }}"><h3>{{ p.name }}</h3><p>{{ p.category }} · Stock: {{ p.stock }}</p><div class="price">S/ {{ '%.2f'|format(p.price) }}</div><button class="btn" onclick="addItem({{ p.id }}, '{{ p.name|replace("'", "") }}', {{ p.price }})">Agregar</button></div>{% endfor %}</div></section><aside class="card"><h2>Carrito</h2><div id="cart"></div><label>Cliente</label><select id="customer" class="inp"><option value="">Cliente general</option>{% for c in customers %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}</select><label>Descuento</label><input id="discount" class="inp" type="number" value="0" min="0" step="0.01" oninput="renderCart()"><label>Pago</label><select id="payment" class="inp"><option>Efectivo</option><option>Tarjeta</option><option>Transferencia</option></select><h2>Total: S/ <span id="total">0.00</span></h2><button class="btn" style="width:100%" onclick="checkout()">Confirmar venta</button><p id="status"></p></aside></div><script>let cart=[];function addItem(id,name,price){let x=cart.find(i=>i.product_id===id);if(x)x.qty++;else cart.push({product_id:id,name,price,qty:1});renderCart()}function delItem(id){cart=cart.filter(i=>i.product_id!==id);renderCart()}function renderCart(){let h='',sub=0;cart.forEach(i=>{sub+=i.price*i.qty;h+=`<div class="cart-item"><span>${i.name}<br>S/ ${i.price.toFixed(2)} x <input style="width:55px" type="number" min="1" value="${i.qty}" onchange="iQty(${i.product_id},this.value)"></span><button onclick="delItem(${i.product_id})">X</button></div>`});document.getElementById('cart').innerHTML=h||'<p>Carrito vacío</p>';let d=parseFloat(document.getElementById('discount').value||0);document.getElementById('total').innerText=Math.max(sub-d,0).toFixed(2)}function iQty(id,v){let x=cart.find(i=>i.product_id===id);if(x)x.qty=Math.max(parseInt(v||1),1);renderCart()}async function checkout(){let r=await fetch('/api/checkout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:cart,discount:document.getElementById('discount').value,customer_id:document.getElementById('customer').value,payment_method:document.getElementById('payment').value})});let j=await r.json();if(j.ok){cart=[];renderCart();document.getElementById('status').innerHTML='Venta registrada. <a href="'+j.receipt_url+'">Ver comprobante</a>'}else alert(j.error)}document.getElementById('search').oninput=e=>{let q=e.target.value.toLowerCase();document.querySelectorAll('.prod').forEach(el=>el.style.display=el.dataset.name.includes(q)?'block':'none')};renderCart()</script>{% endblock %}''',
-"products.html": r'''{% extends "base.html" %}{% block content %}<h1>Productos</h1><div class="card"><form method="post" class="grid"><input class="inp" name="sku" placeholder="SKU"><input class="inp" name="name" placeholder="Producto" required><input class="inp" name="category" placeholder="Categoría"><input class="inp" name="price" type="number" step="0.01" placeholder="Precio"><input class="inp" name="cost" type="number" step="0.01" placeholder="Costo"><input class="inp" name="stock" type="number" placeholder="Stock"><button class="btn">Agregar</button></form></div><div class="card"><table class="table"><tr><th>SKU</th><th>Producto</th><th>Precio</th><th>Stock</th></tr>{% for p in products %}<tr><td>{{ p.sku }}</td><td>{{ p.name }}</td><td>S/ {{ p.price }}</td><td>{{ p.stock }}</td></tr>{% endfor %}</table></div>{% endblock %}''',
-"customers.html": r'''{% extends "base.html" %}{% block content %}<h1>Clientes</h1><div class="card"><form method="post" class="grid"><input class="inp" name="name" placeholder="Nombre" required><input class="inp" name="phone" placeholder="Teléfono"><input class="inp" name="email" placeholder="Correo"><input class="inp" name="notes" placeholder="Nota"><button class="btn">Agregar</button></form></div><div class="card"><table class="table"><tr><th>Nombre</th><th>Teléfono</th><th>Correo</th></tr>{% for c in customers %}<tr><td>{{ c.name }}</td><td>{{ c.phone }}</td><td>{{ c.email }}</td></tr>{% endfor %}</table></div>{% endblock %}''',
-"sales.html": r'''{% extends "base.html" %}{% block content %}<h1>Ventas</h1><div class="card"><table class="table"><tr><th>Código</th><th>Cliente</th><th>Vendedor</th><th>Total</th><th>Pago</th><th>Fecha</th></tr>{% for s in sales %}<tr><td><a href="{{ url_for('receipt', sale_id=s.id) }}">{{ s.sale_code }}</a></td><td>{{ s.customer or 'General' }}</td><td>{{ s.seller }}</td><td>S/ {{ '%.2f'|format(s.total) }}</td><td>{{ s.payment_method }}</td><td>{{ s.created_at }}</td></tr>{% endfor %}</table></div>{% endblock %}''',
-"receipt.html": r'''{% extends "base.html" %}{% block content %}<div class="card" style="max-width:650px"><h1>Comprobante {{ sale.sale_code }}</h1><p>Cliente: {{ sale.customer or 'General' }}<br>Vendedor: {{ sale.seller }}<br>Fecha: {{ sale.created_at }}</p><table class="table"><tr><th>Producto</th><th>Cant.</th><th>Total</th></tr>{% for i in items %}<tr><td>{{ i.name }}</td><td>{{ i.qty }}</td><td>S/ {{ '%.2f'|format(i.total) }}</td></tr>{% endfor %}</table><h2>Total: S/ {{ '%.2f'|format(sale.total) }}</h2><button class="btn" onclick="window.print()">Imprimir</button></div>{% endblock %}''',
-"users.html": r'''{% extends "base.html" %}{% block content %}<h1>Usuarios</h1><div class="card"><form method="post" class="grid"><input class="inp" name="username" placeholder="Usuario" required><input class="inp" name="password" placeholder="Contraseña" required><select class="inp" name="role"><option value="seller">Vendedor</option><option value="admin">Admin</option></select><button class="btn">Crear usuario</button></form></div><div class="card"><table class="table"><tr><th>Usuario</th><th>Rol</th><th>Estado</th><th>Acción</th></tr>{% for u in users %}<tr><td>{{ u.username }}</td><td>{{ u.role }}</td><td>{{ 'Activo' if u.active else 'Bloqueado' }}</td><td><form method="post" action="{{ url_for('toggle_user', user_id=u.id) }}"><button class="btn btn2">Cambiar</button></form></td></tr>{% endfor %}</table></div>{% endblock %}''',
-"close_day.html": r'''{% extends "base.html" %}{% block content %}<h1>Cierre de día</h1><div class="grid"><div class="card"><h2>Ventas hoy</h2><p>Pedidos: {{ stats.n }}</p><h2>S/ {{ '%.2f'|format(stats.total) }}</h2><p>Efectivo: S/ {{ '%.2f'|format(stats.cash) }}<br>Tarjeta: S/ {{ '%.2f'|format(stats.card) }}<br>Transferencia: S/ {{ '%.2f'|format(stats.transfer) }}</p><form method="post"><button class="btn">Registrar cierre</button></form></div><div class="card"><h2>Historial</h2><table class="table"><tr><th>Fecha</th><th>Usuario</th><th>Total</th></tr>{% for c in closings %}<tr><td>{{ c.created_at }}</td><td>{{ c.username }}</td><td>S/ {{ '%.2f'|format(c.total_sales) }}</td></tr>{% endfor %}</table></div></div>{% endblock %}''',
-"error.html": r'''{% extends "base.html" %}{% block content %}<div class="card"><h1>Error interno controlado</h1><p>{{ error }}</p><a class="btn" href="{{ url_for('login') }}">Volver</a></div>{% endblock %}'''
-}
-app.jinja_loader = ChoiceLoader([DictLoader(EMBEDDED_TEMPLATES), FileSystemLoader(os.path.join(BASE_DIR, "templates"))])
+def db():
+    if 'db' not in g:
+        g.db = sqlite3.connect(DB_PATH)
+        g.db.row_factory = sqlite3.Row
+    return g.db
 
-def get_conn():
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+@app.teardown_appcontext
+def close_db(exc=None):
+    con = g.pop('db', None)
+    if con is not None:
+        con.close()
 
-def now_iso():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def q(sql, args=(), one=False):
+    cur = db().execute(sql, args)
+    rows = cur.fetchall()
+    return (rows[0] if rows else None) if one else rows
+
+def execq(sql, args=()):
+    con = db(); cur = con.execute(sql, args); con.commit(); return cur
 
 def init_db():
-    conn = get_conn(); cur = conn.cursor()
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
     cur.executescript('''
-    CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'seller', active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS products(id INTEGER PRIMARY KEY AUTOINCREMENT, sku TEXT UNIQUE, name TEXT NOT NULL, category TEXT DEFAULT 'General', price REAL NOT NULL DEFAULT 0, cost REAL NOT NULL DEFAULT 0, stock INTEGER NOT NULL DEFAULT 0, min_stock INTEGER NOT NULL DEFAULT 5, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-    CREATE TABLE IF NOT EXISTS customers(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, phone TEXT, email TEXT, notes TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-    CREATE TABLE IF NOT EXISTS sales(id INTEGER PRIMARY KEY AUTOINCREMENT, sale_code TEXT UNIQUE NOT NULL, customer_id INTEGER, user_id INTEGER, subtotal REAL NOT NULL, discount REAL NOT NULL DEFAULT 0, total REAL NOT NULL, payment_method TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'PAGADO', created_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS sale_items(id INTEGER PRIMARY KEY AUTOINCREMENT, sale_id INTEGER NOT NULL, product_id INTEGER NOT NULL, qty INTEGER NOT NULL, unit_price REAL NOT NULL, total REAL NOT NULL);
-    CREATE TABLE IF NOT EXISTS day_closings(id INTEGER PRIMARY KEY AUTOINCREMENT, closed_by INTEGER NOT NULL, total_sales REAL NOT NULL, total_orders INTEGER NOT NULL, cash_total REAL NOT NULL, card_total REAL NOT NULL, transfer_total REAL NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS users(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'vendedor', active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS customers(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, phone TEXT DEFAULT '', email TEXT DEFAULT '', created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS products(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, category TEXT NOT NULL, price REAL NOT NULL,
+      stock INTEGER NOT NULL DEFAULT 0, image TEXT DEFAULT '', active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS sales(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE NOT NULL, customer_id INTEGER, user_id INTEGER,
+      subtotal REAL NOT NULL, discount REAL NOT NULL, total REAL NOT NULL, payment TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pagado', created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS sale_items(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, sale_id INTEGER NOT NULL, product_id INTEGER NOT NULL,
+      name TEXT NOT NULL, qty INTEGER NOT NULL, price REAL NOT NULL, total REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS day_closings(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, date TEXT NOT NULL, cash_total REAL NOT NULL,
+      card_total REAL NOT NULL, transfer_total REAL NOT NULL, total REAL NOT NULL, notes TEXT DEFAULT '', created_at TEXT NOT NULL);
     ''')
-    if cur.execute("SELECT COUNT(*) n FROM users").fetchone()["n"] == 0:
-        cur.executemany("INSERT INTO users(username,password_hash,role,created_at) VALUES(?,?,?,?)", [("admin1",generate_password_hash("admin123"),"admin",now_iso()),("admin2",generate_password_hash("admin123"),"admin",now_iso()),("vendedor1",generate_password_hash("venta123"),"seller",now_iso())])
-    if cur.execute("SELECT COUNT(*) n FROM products").fetchone()["n"] == 0:
-        cur.executemany("INSERT INTO products(sku,name,category,price,cost,stock,min_stock) VALUES(?,?,?,?,?,?,?)", [("P001","Menú Ejecutivo","Comedor",12,7.5,200,20),("P002","Combo Almuerzo","Promos",15,9,150,15),("P003","Cena","Comedor",11,6.8,150,15),("P004","Bebida Personal","Bebidas",3.5,1.8,300,30),("P005","Postre","Comedor",4,2,100,10)])
-    if cur.execute("SELECT COUNT(*) n FROM customers").fetchone()["n"] == 0:
-        cur.execute("INSERT INTO customers(name,phone,email,notes) VALUES(?,?,?,?)", ("Cliente General","","","Venta rápida"))
-    conn.commit(); conn.close()
+    now = datetime.now().isoformat(timespec='seconds')
+    users = cur.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+    if users == 0:
+        cur.executemany('INSERT INTO users(username,password_hash,role,active,created_at) VALUES(?,?,?,?,?)', [
+            ('admin1', generate_password_hash('admin123'), 'admin', 1, now),
+            ('vendedor1', generate_password_hash('venta123'), 'vendedor', 1, now),
+        ])
+    cust = cur.execute('SELECT COUNT(*) FROM customers').fetchone()[0]
+    if cust == 0:
+        cur.executemany('INSERT INTO customers(name,phone,email,created_at) VALUES(?,?,?,?)', [
+            ('Cliente general','','',now), ('Cliente WhatsApp','','',now), ('Mesa rápida','','',now)
+        ])
+    prod = cur.execute('SELECT COUNT(*) FROM products').fetchone()[0]
+    if prod == 0:
+        products = [
+            ('Menú Ejecutivo','Comidas',12,200,'🍽️'), ('Combo Almuerzo','Combos',15,150,'🥘'), ('Cena','Comidas',11,150,'🍛'),
+            ('Bebida Personal','Bebidas',3.5,300,'🥤'), ('Postre','Postres',4,100,'🍮'), ('Entrada','Comidas',5,120,'🥗'),
+            ('Promo Familiar','Promos',35,60,'🛍️'), ('Café','Bebidas',4.5,90,'☕'), ('Agua','Bebidas',2.5,280,'💧')]
+        cur.executemany('INSERT INTO products(name,category,price,stock,image,active,created_at) VALUES(?,?,?,?,?,?,?)',
+                        [(n,c,p,s,img,1,now) for n,c,p,s,img in products])
+    con.commit(); con.close()
 
-init_db()
+with app.app_context():
+    init_db()
 
-def get_user():
-    uid = session.get("user_id")
-    if not uid: return None
-    conn = get_conn(); user = conn.execute("SELECT id,username,role,active,created_at FROM users WHERE id=? AND active=1", (uid,)).fetchone(); conn.close(); return user
-
-@app.context_processor
-def inject_globals(): return {"me": get_user(), "app_name": "AORIX POS Pro"}
-
-def login_required(fn):
-    @wraps(fn)
+def login_required(f):
+    @wraps(f)
     def wrapper(*args, **kwargs):
-        if not session.get("user_id"): return redirect(url_for("login"))
-        return fn(*args, **kwargs)
+        if not session.get('user_id'):
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
     return wrapper
 
-def admin_required(fn):
-    @wraps(fn)
+def admin_required(f):
+    @wraps(f)
     def wrapper(*args, **kwargs):
-        if session.get("role") != "admin": flash("Solo administrador puede realizar esta acción.", "error"); return redirect(url_for("checkout"))
-        return fn(*args, **kwargs)
+        if session.get('role') != 'admin':
+            flash('Solo administrador.', 'error'); return redirect(url_for('checkout'))
+        return f(*args, **kwargs)
     return wrapper
 
 @app.errorhandler(Exception)
 def handle_exception(e):
-    app.logger.exception("Error interno: %s", e)
-    return f"""<!doctype html><html lang='es'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Error</title><style>body{{font-family:Arial;background:#f8fafc;padding:30px}}.box{{max-width:760px;margin:auto;background:white;border-radius:18px;padding:24px;box-shadow:0 8px 25px #0001}}code{{color:#b91c1c}}</style></head><body><div class='box'><h1>Error interno controlado</h1><p>La app está viva, pero ocurrió este error:</p><code>{str(e)}</code><p><a href='/'>Volver al inicio</a></p></div></body></html>""", 500
+    code = getattr(e, 'code', 500)
+    app.logger.exception('ERROR CONTROLADO')
+    return render_template('error.html', error=str(e), code=code), code
 
-@app.route("/healthz", methods=["GET","HEAD"])
-def healthz(): return "OK", 200
+@app.route('/healthz', methods=['GET','HEAD'])
+def healthz(): return 'ok', 200
 
-@app.route("/", methods=["GET","HEAD","POST"])
+@app.route('/', methods=['GET','HEAD'])
+def index():
+    return redirect(url_for('checkout') if session.get('user_id') else url_for('login'))
+
+@app.route('/login', methods=['GET','POST','HEAD'])
 def login():
-    if request.method == "HEAD": return "", 200
-    if session.get("user_id") and request.method == "GET": return redirect(url_for("checkout"))
-    if request.method == "POST":
-        username = request.form.get("username", "").strip(); password = request.form.get("password", "")
-        conn=get_conn(); user=conn.execute("SELECT * FROM users WHERE username=? AND active=1",(username,)).fetchone(); conn.close()
-        if user and check_password_hash(user["password_hash"], password):
-            session["user_id"]=user["id"]; session["username"]=user["username"]; session["role"]=user["role"]; return redirect(url_for("checkout"))
-        flash("Usuario o contraseña incorrectos.", "error")
-    return render_template("login.html")
+    if request.method == 'POST':
+        user = q('SELECT * FROM users WHERE username=? AND active=1', (request.form.get('username','').strip(),), True)
+        if user and check_password_hash(user['password_hash'], request.form.get('password','')):
+            session.clear(); session['user_id']=user['id']; session['username']=user['username']; session['role']=user['role']
+            return redirect(url_for('checkout'))
+        flash('Usuario o contraseña incorrectos.', 'error')
+    return render_template('login.html')
 
-@app.route("/logout")
-def logout(): session.clear(); return redirect(url_for("login"))
+@app.route('/logout')
+def logout(): session.clear(); return redirect(url_for('login'))
 
-@app.route("/checkout")
+@app.route('/checkout')
 @login_required
 def checkout():
-    conn=get_conn(); products=conn.execute("SELECT * FROM products WHERE active=1 ORDER BY category,name").fetchall(); customers=conn.execute("SELECT * FROM customers ORDER BY name").fetchall(); conn.close(); return render_template("checkout.html", products=products, customers=customers)
+    return render_template('checkout.html')
 
-@app.route("/api/products")
+@app.route('/api/bootstrap')
 @login_required
-def api_products():
-    q="%"+request.args.get("q","").strip()+"%"; conn=get_conn(); rows=conn.execute("SELECT * FROM products WHERE active=1 AND (name LIKE ? OR sku LIKE ? OR category LIKE ?) ORDER BY name",(q,q,q)).fetchall(); conn.close(); return jsonify([dict(r) for r in rows])
+def api_bootstrap():
+    products = [dict(r) for r in q('SELECT * FROM products WHERE active=1 ORDER BY category,name')]
+    customers = [dict(r) for r in q('SELECT * FROM customers ORDER BY id')]
+    cats = sorted({p['category'] for p in products})
+    return jsonify(products=products, customers=customers, categories=cats, user={'username':session['username'],'role':session['role']})
 
-@app.route("/api/checkout", methods=["POST"])
+@app.route('/api/checkout', methods=['POST'])
 @login_required
 def api_checkout():
-    data=request.get_json(silent=True) or {}; items=data.get("items") or []
-    if not items: return jsonify({"ok":False,"error":"Carrito vacío"}),400
-    try: discount=max(float(data.get("discount") or 0),0)
-    except Exception: discount=0
-    payment=data.get("payment_method") or "Efectivo"; customer_id=data.get("customer_id") or None
-    conn=get_conn(); cur=conn.cursor()
-    try:
-        subtotal=0; checked=[]
-        for item in items:
-            pid=int(item.get("product_id")); qty=int(item.get("qty",0))
-            if qty<=0: raise ValueError("Cantidad inválida")
-            p=cur.execute("SELECT * FROM products WHERE id=? AND active=1",(pid,)).fetchone()
-            if not p: raise ValueError("Producto no encontrado")
-            if int(p["stock"])<qty: raise ValueError(f"Stock insuficiente: {p['name']}")
-            line=qty*float(p["price"]); subtotal+=line; checked.append((p,qty,line))
-        total=max(subtotal-discount,0); code="V"+datetime.now().strftime("%Y%m%d%H%M%S%f")
-        cur.execute("INSERT INTO sales(sale_code,customer_id,user_id,subtotal,discount,total,payment_method,created_at) VALUES(?,?,?,?,?,?,?,?)",(code,customer_id,session["user_id"],subtotal,discount,total,payment,now_iso()))
-        sale_id=cur.lastrowid
-        for p,qty,line in checked:
-            cur.execute("INSERT INTO sale_items(sale_id,product_id,qty,unit_price,total) VALUES(?,?,?,?,?)",(sale_id,p["id"],qty,p["price"],line)); cur.execute("UPDATE products SET stock=stock-? WHERE id=?",(qty,p["id"]))
-        conn.commit(); return jsonify({"ok":True,"sale_id":sale_id,"sale_code":code,"total":total,"receipt_url":url_for("receipt",sale_id=sale_id)})
-    except Exception as e:
-        conn.rollback(); return jsonify({"ok":False,"error":str(e)}),400
-    finally: conn.close()
+    data = request.get_json(force=True)
+    items = data.get('items') or []
+    if not items: return jsonify(ok=False, error='Carrito vacío'), 400
+    discount = max(float(data.get('discount') or 0), 0)
+    payment = data.get('payment') or 'Efectivo'
+    customer_id = int(data.get('customer_id') or 1)
+    subtotal = 0.0
+    checked = []
+    for item in items:
+        pid = int(item['id']); qty = int(item.get('qty') or 1)
+        prod = q('SELECT * FROM products WHERE id=? AND active=1', (pid,), True)
+        if not prod: return jsonify(ok=False, error='Producto no existe'), 400
+        if prod['stock'] < qty: return jsonify(ok=False, error=f'Stock insuficiente: {prod["name"]}'), 400
+        line = round(prod['price'] * qty, 2); subtotal += line
+        checked.append((prod, qty, line))
+    total = max(round(subtotal - discount, 2), 0)
+    code = 'V' + datetime.now().strftime('%Y%m%d%H%M%S')
+    cur = execq('INSERT INTO sales(code,customer_id,user_id,subtotal,discount,total,payment,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+          (code, customer_id, session['user_id'], subtotal, discount, total, payment, 'pagado', datetime.now().isoformat(timespec='seconds')))
+    sale_id = cur.lastrowid
+    for prod, qty, line in checked:
+        execq('INSERT INTO sale_items(sale_id,product_id,name,qty,price,total) VALUES(?,?,?,?,?,?)',
+              (sale_id, prod['id'], prod['name'], qty, prod['price'], line))
+        execq('UPDATE products SET stock=stock-? WHERE id=?', (qty, prod['id']))
+    return jsonify(ok=True, sale_id=sale_id, code=code, receipt=url_for('receipt', sale_id=sale_id))
 
-@app.route("/receipt/<int:sale_id>")
+@app.route('/receipt/<int:sale_id>')
 @login_required
 def receipt(sale_id):
-    conn=get_conn(); sale=conn.execute("SELECT s.*, c.name customer, u.username seller FROM sales s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN users u ON u.id=s.user_id WHERE s.id=?",(sale_id,)).fetchone()
-    if not sale: conn.close(); flash("Venta no encontrada.","error"); return redirect(url_for("sales"))
-    items=conn.execute("SELECT si.*, p.name, p.sku FROM sale_items si JOIN products p ON p.id=si.product_id WHERE si.sale_id=?",(sale_id,)).fetchall(); conn.close(); return render_template("receipt.html", sale=sale, items=items)
+    sale = q('SELECT s.*, c.name customer, u.username user FROM sales s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN users u ON u.id=s.user_id WHERE s.id=?', (sale_id,), True)
+    if not sale: abort(404)
+    items = q('SELECT * FROM sale_items WHERE sale_id=?', (sale_id,))
+    return render_template('receipt.html', sale=sale, items=items)
 
-@app.route("/products", methods=["GET","POST"])
+@app.route('/sales')
+@login_required
+def sales():
+    rows = q('SELECT s.*, c.name customer, u.username user FROM sales s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN users u ON u.id=s.user_id ORDER BY s.id DESC LIMIT 200')
+    return render_template('sales.html', rows=rows)
+
+@app.route('/products', methods=['GET','POST'])
 @login_required
 @admin_required
 def products():
-    conn=get_conn()
-    if request.method=="POST":
-        f=request.form
-        try:
-            conn.execute("INSERT INTO products(sku,name,category,price,cost,stock,min_stock) VALUES(?,?,?,?,?,?,?)",(f.get("sku") or None,f.get("name"),f.get("category") or "General",float(f.get("price") or 0),float(f.get("cost") or 0),int(f.get("stock") or 0),int(f.get("min_stock") or 0))); conn.commit(); flash("Producto creado correctamente.","ok")
-        except sqlite3.IntegrityError: flash("El SKU ya existe.","error")
-    rows=conn.execute("SELECT * FROM products ORDER BY id DESC").fetchall(); conn.close(); return render_template("products.html", products=rows)
+    if request.method == 'POST':
+        execq('INSERT INTO products(name,category,price,stock,image,active,created_at) VALUES(?,?,?,?,?,?,?)',
+              (request.form['name'], request.form['category'], float(request.form['price']), int(request.form['stock']), request.form.get('image','📦'), 1, datetime.now().isoformat(timespec='seconds')))
+        return redirect(url_for('products'))
+    rows = q('SELECT * FROM products ORDER BY category,name')
+    return render_template('products.html', rows=rows)
 
-@app.route("/customers", methods=["GET","POST"])
+@app.route('/customers', methods=['GET','POST'])
 @login_required
 def customers():
-    conn=get_conn()
-    if request.method=="POST":
-        f=request.form; conn.execute("INSERT INTO customers(name,phone,email,notes) VALUES(?,?,?,?)",(f.get("name"),f.get("phone"),f.get("email"),f.get("notes"))); conn.commit(); flash("Cliente creado correctamente.","ok")
-    rows=conn.execute("SELECT * FROM customers ORDER BY id DESC").fetchall(); conn.close(); return render_template("customers.html", customers=rows)
+    if request.method == 'POST':
+        execq('INSERT INTO customers(name,phone,email,created_at) VALUES(?,?,?,?)',
+              (request.form['name'], request.form.get('phone',''), request.form.get('email',''), datetime.now().isoformat(timespec='seconds')))
+        return redirect(url_for('customers'))
+    rows = q('SELECT * FROM customers ORDER BY id DESC')
+    return render_template('customers.html', rows=rows)
 
-@app.route("/sales")
-@login_required
-def sales():
-    conn=get_conn(); rows=conn.execute("SELECT s.*, c.name customer, u.username seller FROM sales s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN users u ON u.id=s.user_id ORDER BY s.id DESC LIMIT 500").fetchall(); conn.close(); return render_template("sales.html", sales=rows)
-
-@app.route("/users", methods=["GET","POST"])
+@app.route('/users', methods=['GET','POST'])
 @login_required
 @admin_required
 def users():
-    conn=get_conn()
-    if request.method=="POST":
-        f=request.form
-        try: conn.execute("INSERT INTO users(username,password_hash,role,created_at) VALUES(?,?,?,?)",(f.get("username"),generate_password_hash(f.get("password") or "123456"),f.get("role") or "seller",now_iso())); conn.commit(); flash("Usuario creado correctamente.","ok")
-        except sqlite3.IntegrityError: flash("Ese usuario ya existe.","error")
-    rows=conn.execute("SELECT id,username,role,active,created_at FROM users ORDER BY id DESC").fetchall(); conn.close(); return render_template("users.html", users=rows)
+    if request.method == 'POST':
+        execq('INSERT INTO users(username,password_hash,role,active,created_at) VALUES(?,?,?,?,?)',
+              (request.form['username'], generate_password_hash(request.form['password']), request.form['role'], 1, datetime.now().isoformat(timespec='seconds')))
+        return redirect(url_for('users'))
+    rows = q('SELECT id,username,role,active,created_at FROM users ORDER BY id DESC')
+    return render_template('users.html', rows=rows)
 
-@app.route("/users/<int:user_id>/toggle", methods=["POST"])
-@login_required
-@admin_required
-def toggle_user(user_id):
-    if user_id==session.get("user_id"): flash("No puedes desactivar tu propio usuario.","error"); return redirect(url_for("users"))
-    conn=get_conn(); conn.execute("UPDATE users SET active=CASE WHEN active=1 THEN 0 ELSE 1 END WHERE id=?",(user_id,)); conn.commit(); conn.close(); flash("Estado actualizado.","ok"); return redirect(url_for("users"))
-
-@app.route("/close-day", methods=["GET","POST"])
+@app.route('/close-day', methods=['GET','POST'])
 @login_required
 def close_day():
-    conn=get_conn(); stats=conn.execute("SELECT COUNT(*) n, COALESCE(SUM(total),0) total, COALESCE(SUM(CASE WHEN payment_method='Efectivo' THEN total ELSE 0 END),0) cash, COALESCE(SUM(CASE WHEN payment_method='Tarjeta' THEN total ELSE 0 END),0) card, COALESCE(SUM(CASE WHEN payment_method='Transferencia' THEN total ELSE 0 END),0) transfer FROM sales WHERE date(created_at)=date('now','localtime')").fetchone()
-    if request.method=="POST": conn.execute("INSERT INTO day_closings(closed_by,total_sales,total_orders,cash_total,card_total,transfer_total,created_at) VALUES(?,?,?,?,?,?,?)",(session["user_id"],stats["total"],stats["n"],stats["cash"],stats["card"],stats["transfer"],now_iso())); conn.commit(); flash("Día cerrado correctamente.","ok")
-    closings=conn.execute("SELECT dc.*, u.username FROM day_closings dc JOIN users u ON u.id=dc.closed_by ORDER BY dc.id DESC LIMIT 100").fetchall(); conn.close(); return render_template("close_day.html", stats=stats, closings=closings)
+    today = datetime.now().strftime('%Y-%m-%d')
+    sums = {r['payment']: r['total'] for r in q("SELECT payment, SUM(total) total FROM sales WHERE substr(created_at,1,10)=? GROUP BY payment", (today,))}
+    total = sum(v or 0 for v in sums.values())
+    if request.method == 'POST':
+        execq('INSERT INTO day_closings(user_id,date,cash_total,card_total,transfer_total,total,notes,created_at) VALUES(?,?,?,?,?,?,?,?)',
+              (session['user_id'], today, sums.get('Efectivo',0) or 0, sums.get('Tarjeta',0) or 0, sums.get('Transferencia',0) or 0, total, request.form.get('notes',''), datetime.now().isoformat(timespec='seconds')))
+        flash('Día cerrado correctamente.', 'ok')
+    closes = q('SELECT d.*, u.username FROM day_closings d LEFT JOIN users u ON u.id=d.user_id ORDER BY d.id DESC LIMIT 50')
+    return render_template('close_day.html', sums=sums, total=total, closes=closes, today=today)
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT",5000)), debug=True)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=True)
